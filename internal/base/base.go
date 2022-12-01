@@ -237,6 +237,8 @@ type TaskMessage struct {
 	// Type indicates the kind of the task to be performed.
 	Type string
 
+	Headers map[string]string
+
 	// Payload holds data needed to process the task.
 	Payload []byte
 
@@ -316,6 +318,7 @@ func EncodeMessage(msg *TaskMessage) ([]byte, error) {
 		GroupKey:     msg.GroupKey,
 		Retention:    msg.Retention,
 		CompletedAt:  msg.CompletedAt,
+		Headers:      msg.Headers,
 	})
 }
 
@@ -340,6 +343,7 @@ func DecodeMessage(data []byte) (*TaskMessage, error) {
 		GroupKey:     pbmsg.GetGroupKey(),
 		Retention:    pbmsg.GetRetention(),
 		CompletedAt:  pbmsg.GetCompletedAt(),
+		Headers:      pbmsg.GetHeaders(),
 	}, nil
 }
 

@@ -15,6 +15,9 @@ import (
 	"github.com/hibiken/asynq/internal/base"
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/rdb"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // A Client is responsible for scheduling tasks.
@@ -150,9 +153,9 @@ func (t deadlineOption) Value() interface{} { return time.Time(t) }
 // TTL duration must be greater than or equal to 1 second.
 //
 // Uniqueness of a task is based on the following properties:
-//     - Task Type
-//     - Task Payload
-//     - Queue Name
+//   - Task Type
+//   - Task Payload
+//   - Queue Name
 func Unique(ttl time.Duration) Option {
 	return uniqueOption(ttl)
 }
@@ -338,6 +341,7 @@ func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
 // If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
 //
 // The first argument context applies to the enqueue operation. To specify task timeout and deadline, use Timeout and Deadline option instead.
+
 func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option) (*TaskInfo, error) {
 	if task == nil {
 		return nil, fmt.Errorf("task cannot be nil")
@@ -345,6 +349,13 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	if strings.TrimSpace(task.Type()) == "" {
 		return nil, fmt.Errorf("task typename cannot be empty")
 	}
+	ctx, span := otel.Tracer(tracerName).
+		Start(
+			ctx,
+			"enqueue."+task.Type(),
+			trace.WithSpanKind(trace.SpanKindClient),
+		)
+	defer span.End()
 	// merge task options with the options provided at enqueue time.
 	opts = append(task.opts, opts...)
 	opt, err := composeOptions(opts...)
@@ -378,7 +389,13 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 		UniqueKey: uniqueKey,
 		GroupKey:  opt.group,
 		Retention: int64(opt.retention.Seconds()),
+		Headers:   map[string]string{},
 	}
+	otel.GetTextMapPropagator().Inject(ctx, &metadataSupplier{taskMessage: msg})
+	span.SetAttributes(
+		attribute.String("queue", opt.queue),
+		attribute.String("type", task.Type()),
+	)
 	now := time.Now()
 	var state base.TaskState
 	if opt.processAt.After(now) {

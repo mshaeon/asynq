@@ -21,6 +21,10 @@ import (
 	"github.com/hibiken/asynq/internal/errors"
 	"github.com/hibiken/asynq/internal/log"
 	"github.com/hibiken/asynq/internal/timeutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/time/rate"
 )
 
@@ -166,6 +170,7 @@ func (p *processor) start(wg *sync.WaitGroup) {
 // exec pulls a task out of the queue and starts a worker goroutine to
 // process the task.
 func (p *processor) exec() {
+
 	select {
 	case <-p.quit:
 		return
@@ -226,6 +231,7 @@ func (p *processor) exec() {
 						broker: p.broker,
 						ctx:    ctx,
 					},
+					msg.Headers,
 				)
 				resCh <- p.perform(ctx, task)
 			}()
@@ -411,6 +417,33 @@ func (p *processor) queues() []string {
 // If the call returns without panic, it simply returns the value,
 // otherwise, it recovers from panic and returns an error.
 func (p *processor) perform(ctx context.Context, task *Task) (err error) {
+	tm := base.TaskMessage{
+		Headers: task.headers,
+	}
+
+	ctx = otel.GetTextMapPropagator().Extract(ctx, &metadataSupplier{
+		taskMessage: &tm,
+	})
+
+	tracer := otel.Tracer(tracerName)
+	ctx, span := tracer.Start(
+		trace.ContextWithRemoteSpanContext(ctx, trace.SpanContextFromContext(ctx)),
+		"perform."+task.typename,
+		trace.WithSpanKind(trace.SpanKindServer),
+	)
+	attrs := []attribute.KeyValue{
+		attribute.String("type", task.typename),
+	}
+	for _, v := range task.opts {
+		if str, ok := v.Value().(fmt.Stringer); ok {
+			attrs = append(attrs, attribute.String(fmt.Sprint(v.Type()), str.String()))
+		} else {
+			attrs = append(attrs, attribute.String(fmt.Sprint(v.Type()), fmt.Sprintf("%v", v.Value())))
+		}
+	}
+	span.SetAttributes(attrs...)
+	defer span.End()
+
 	defer func() {
 		if x := recover(); x != nil {
 			p.logger.Errorf("recovering from panic. See the stack trace below for details:\n%s", string(debug.Stack()))
@@ -427,9 +460,18 @@ func (p *processor) perform(ctx context.Context, task *Task) (err error) {
 			} else {
 				err = fmt.Errorf("panic: %v", x)
 			}
+			if err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+			}
 		}
 	}()
-	return p.handler.ProcessTask(ctx, task)
+	err = p.handler.ProcessTask(ctx, task)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return
 }
 
 // uniq dedupes elements and returns a slice of unique names of length l.
