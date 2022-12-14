@@ -38,6 +38,12 @@ type Task struct {
 func (t *Task) Type() string               { return t.typename }
 func (t *Task) Payload() []byte            { return t.payload }
 func (t *Task) Headers() map[string]string { return t.headers }
+func (t *Task) SetHeader(key string, value string) {
+	if t.headers == nil {
+		t.headers = make(map[string]string)
+	}
+	t.headers[key] = value
+}
 
 // ResultWriter returns a pointer to the ResultWriter associated with the task.
 //

@@ -5,6 +5,7 @@
 package asynq
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
@@ -142,7 +143,7 @@ func (j *enqueueJob) Run() {
 	if j.preEnqueueFunc != nil {
 		j.preEnqueueFunc(j.task, j.opts)
 	}
-	info, err := j.client.Enqueue(j.task, j.opts...)
+	info, err := j.client.Enqueue(context.Background(), j.task, j.opts...)
 	if j.postEnqueueFunc != nil {
 		j.postEnqueueFunc(info, err)
 	}

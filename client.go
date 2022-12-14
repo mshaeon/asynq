@@ -27,7 +27,8 @@ import (
 //
 // Clients are safe for concurrent use by multiple goroutines.
 type Client struct {
-	broker base.Broker
+	broker      base.Broker
+	middlewares []ClientMiddleware
 }
 
 // NewClient returns a new Client instance given a redis connection option.
@@ -36,7 +37,9 @@ func NewClient(r RedisConnOpt) *Client {
 	if !ok {
 		panic(fmt.Sprintf("asynq: unsupported RedisConnOpt type %T", r))
 	}
-	return &Client{broker: rdb.NewRDB(c)}
+	return &Client{
+		broker: rdb.NewRDB(c),
+	}
 }
 
 type OptionType int
@@ -324,37 +327,20 @@ func (c *Client) Close() error {
 //
 // If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
 //
-// Enqueue uses context.Background internally; to specify the context, use EnqueueContext.
-func (c *Client) Enqueue(task *Task, opts ...Option) (*TaskInfo, error) {
-	return c.EnqueueContext(context.Background(), task, opts...)
-}
-
-// EnqueueContext enqueues the given task to a queue.
-//
-// EnqueueContext returns TaskInfo and nil error if the task is enqueued successfully, otherwise returns a non-nil error.
-//
-// The argument opts specifies the behavior of task processing.
-// If there are conflicting Option values the last one overrides others.
-// Any options provided to NewTask can be overridden by options passed to Enqueue.
-// By default, max retry is set to 25 and timeout is set to 30 minutes.
-//
-// If no ProcessAt or ProcessIn options are provided, the task will be pending immediately.
-//
 // The first argument context applies to the enqueue operation. To specify task timeout and deadline, use Timeout and Deadline option instead.
 
-func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option) (*TaskInfo, error) {
+func (c *Client) Enqueue(ctx context.Context, task *Task, opts ...Option) (*TaskInfo, error) {
 	if task == nil {
 		return nil, fmt.Errorf("task cannot be nil")
 	}
 	if strings.TrimSpace(task.Type()) == "" {
 		return nil, fmt.Errorf("task typename cannot be empty")
 	}
-	ctx, span := otel.Tracer(tracerName).
-		Start(
-			ctx,
-			"enqueue."+task.Type(),
-			trace.WithSpanKind(trace.SpanKindClient),
-		)
+	ctx, span := otel.Tracer(tracerName).Start(
+		ctx,
+		"enqueue."+task.Type(),
+		trace.WithSpanKind(trace.SpanKindClient),
+	)
 	defer span.End()
 	// merge task options with the options provided at enqueue time.
 	opts = append(task.opts, opts...)
@@ -362,6 +348,15 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 	if err != nil {
 		return nil, err
 	}
+	if len(c.middlewares) > 0 {
+		for _, m := range c.middlewares {
+			ctx, err = m(ctx, task)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	deadline := noDeadline
 	if !opt.deadline.IsZero() {
 		deadline = opt.deadline
@@ -390,6 +385,11 @@ func (c *Client) EnqueueContext(ctx context.Context, task *Task, opts ...Option)
 		GroupKey:  opt.group,
 		Retention: int64(opt.retention.Seconds()),
 		Headers:   map[string]string{},
+	}
+	if task.headers != nil {
+		for k, v := range task.headers {
+			msg.Headers[k] = v
+		}
 	}
 	otel.GetTextMapPropagator().Inject(ctx, &metadataSupplier{taskMessage: msg})
 	span.SetAttributes(
@@ -442,4 +442,15 @@ func (c *Client) addToGroup(ctx context.Context, msg *base.TaskMessage, group st
 		return c.broker.AddToGroupUnique(ctx, msg, group, uniqueTTL)
 	}
 	return c.broker.AddToGroup(ctx, msg, group)
+}
+
+type ClientMiddleware func(ctx context.Context, msg *Task) (context.Context, error)
+
+func (c *Client) Use(fn ClientMiddleware) {
+	if c.middlewares == nil {
+		c.middlewares = []ClientMiddleware{fn}
+		return
+	}
+	c.middlewares = append(c.middlewares, fn)
+
 }
